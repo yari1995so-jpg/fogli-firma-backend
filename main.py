@@ -2,7 +2,6 @@ from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 from PIL import Image, ImageOps
-from skimage.measure import label, regionprops
 import io
 import base64
 import json
@@ -22,14 +21,12 @@ app.add_middleware(
 def read_root():
     return {"status": "online", "message": "Fogli Firma AI Backend Operativo"}
 
-def process_and_extract_crops(pil_img):
-    # Applica orientamento EXIF per foto scattate da iPhone/Android
+def extract_signature_crops(pil_img):
     try:
         pil_img = ImageOps.exif_transpose(pil_img)
     except Exception:
         pass
 
-    # Converti sempre prima in RGB e poi in scala di grigi per evitare crash su PNG con Alpha o HEIC
     gray = pil_img.convert("RGB").convert("L")
     
     w, h = gray.size
@@ -39,23 +36,35 @@ def process_and_extract_crops(pil_img):
     
     img_np = np.array(gray)
     
+    # Binarizzazione
     threshold = np.mean(img_np) * 0.85
-    binary = img_np < threshold
+    binary = (img_np < threshold).astype(np.uint8)
 
-    labeled = label(binary)
-    regions = regionprops(labeled)
-
+    # Estrazione regioni tramite griglia dinamica (Zero librerie esterne pesanti)
+    curr_h, curr_w = binary.shape
     crops = []
-    curr_h, curr_w = img_np.shape
+    
+    row_sums = np.sum(binary, axis=1)
+    threshold_row = np.mean(row_sums) * 0.3
+    active_rows = np.where(row_sums > threshold_row)[0]
 
-    for reg in regions:
-        min_y, min_x, max_y, max_x = reg.bbox
-        w_box = max_x - min_x
-        h_box = max_y - min_y
-
-        if w_box > 30 and h_box > 15 and w_box < curr_w * 0.8 and h_box < curr_h * 0.5:
-            crop_np = binary[min_y:max_y, min_x:max_x]
-            crops.append(crop_np)
+    if len(active_rows) > 0:
+        y_min, y_max = active_rows[0], active_rows[-1]
+        step = max(30, int((y_max - y_min) / 6))
+        
+        for y in range(y_min, y_max, step):
+            band = binary[y:min(y+step, curr_h), :]
+            col_sums = np.sum(band, axis=0)
+            active_cols = np.where(col_sums > 2)[0]
+            
+            if len(active_cols) > 0:
+                x_min, x_max = active_cols[0], active_cols[-1]
+                w_box = x_max - x_min
+                h_box = band.shape[0]
+                
+                if w_box > 25 and h_box > 15:
+                    crop_np = binary[y:y+h_box, x_min:x_max]
+                    crops.append(crop_np)
 
     return crops
 
@@ -76,14 +85,14 @@ async def scan_sheet(
         try:
             pil_img = Image.open(io.BytesIO(contents))
         except Exception as img_err:
-            return {"status": "error", "message": f"Formato immagine non supportato: {str(img_err)}"}
+            return {"status": "error", "message": f"Formato immagine non valido: {str(img_err)}"}
 
         try:
             db_signatures = json.loads(db_signatures_json)
         except Exception:
             return {"status": "error", "message": "Anagrafica firme non valida."}
 
-        found_crops = process_and_extract_crops(pil_img)
+        found_crops = extract_signature_crops(pil_img)
         matches = []
 
         for crop in found_crops:
@@ -94,10 +103,7 @@ async def scan_sheet(
             for sig in db_signatures:
                 try:
                     raw_data = sig.get("dataUrl", "")
-                    if "," in raw_data:
-                        sample_data = raw_data.split(",")[1]
-                    else:
-                        sample_data = raw_data
+                    sample_data = raw_data.split(",")[1] if "," in raw_data else raw_data
 
                     sample_bytes = base64.b64decode(sample_data)
                     sample_pil = Image.open(io.BytesIO(sample_bytes))
@@ -117,8 +123,7 @@ async def scan_sheet(
                 except Exception:
                     continue
 
-            # Soglia di corrispondenza al 55%
-            if max_score >= 0.55 and best_name:
+            if max_score >= 0.50 and best_name:
                 matches.append({
                     "dipendente": best_name,
                     "score": round(float(max_score * 100), 1)
@@ -133,5 +138,4 @@ async def scan_sheet(
         return {"status": "success", "matches": list(unique.values())}
 
     except Exception as e:
-        print("CRASH SERVER:", traceback.format_exc())
-        return {"status": "error", "message": f"Errore interno del server: {str(e)}"}
+        return {"status": "error", "message": f"Errore interno: {str(e)}"}
