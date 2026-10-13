@@ -1,5 +1,5 @@
 fastapi
 uvicorn
-numpy
-python-multipart
+requests
 pillow
+numpy
