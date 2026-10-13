@@ -40,49 +40,40 @@ def extract_signature_crops(pil_img):
     gray = pil_img.convert("RGB").convert("L")
     
     w, h = gray.size
-    if max(w, h) > 1000:
-        scale = 1000.0 / max(w, h)
+    if max(w, h) > 1200:
+        scale = 1200.0 / max(w, h)
         gray = gray.resize((int(w * scale), int(h * scale)))
     
     img_np = np.array(gray)
-    # Filtra il fondo bianco per isolare meglio i tratti a penna scuri
-    threshold = np.mean(img_np) * 0.75
+    
+    # Binarizzazione basata sul contrasto locale dell'immagine
+    threshold = np.percentile(img_np, 25)
     binary = (img_np < threshold).astype(np.uint8)
 
     curr_h, curr_w = binary.shape
     crops = []
-    
-    row_sums = np.sum(binary, axis=1)
-    threshold_row = np.mean(row_sums) * 0.4
-    active_rows = np.where(row_sums > threshold_row)[0]
 
-    if len(active_rows) > 0:
-        y_min, y_max = active_rows[0], active_rows[-1]
-        step = max(35, int((y_max - y_min) / 8))
-        
-        for y in range(y_min, y_max, step):
-            band = binary[y:min(y+step, curr_h), :]
-            col_sums = np.sum(band, axis=0)
-            active_cols = np.where(col_sums > 4)[0]
+    # Scansione a finestre sovrapposte per catturare le firme intere
+    win_h = max(40, int(curr_h / 12))
+    win_w = max(100, int(curr_w / 3))
+    step_y = int(win_h / 2)
+    step_x = int(win_w / 2)
+
+    for y in range(0, curr_h - win_h, step_y):
+        for x in range(0, curr_w - win_w, step_x):
+            sub_np = binary[y:y+win_h, x:x+win_w]
+            pixel_count = np.sum(sub_np)
             
-            if len(active_cols) > 0:
-                x_min, x_max = active_cols[0], active_cols[-1]
-                w_box = x_max - x_min
-                h_box = band.shape[0]
-                
-                # Ignora rettangoli troppo piccoli o sproporzionati (linee o righe)
-                if w_box > 40 and h_box > 20 and (w_box / max(1, h_box)) < 6:
-                    crop_np = binary[y:y+h_box, x_min:x_max]
-                    # Verifica che contenga abbastanza pixel scuri da essere una firma vera
-                    if np.sum(crop_np) > 80:
-                        crops.append(crop_np)
+            # Filtra per garantire che ci sia del tratto a penna significativo
+            if 100 < pixel_count < (win_h * win_w * 0.45):
+                crops.append(sub_np)
 
     return crops
 
 def get_feature_vector(binary_array):
     img = Image.fromarray((binary_array * 255).astype(np.uint8))
     img_resized = img.resize((64, 64), Image.Resampling.BILINEAR)
-    vec = np.array(img_resized) > 120
+    vec = np.array(img_resized) > 80
     return vec.astype(np.float32)
 
 @app.post("/scan-sheet")
@@ -129,7 +120,7 @@ async def scan_sheet(request: Request):
                     sample_pil = Image.open(io.BytesIO(sample_bytes))
                     sample_gray = sample_pil.convert("RGB").convert("L")
                     
-                    sample_np = np.array(sample_gray) < 140
+                    sample_np = np.array(sample_gray) < 180
                     sample_vec = get_feature_vector(sample_np)
 
                     intersection = np.sum(crop_vec * sample_vec)
@@ -143,8 +134,8 @@ async def scan_sheet(request: Request):
                 except Exception:
                     continue
 
-            # Aumentiamo la soglia minima di affinità al 68% per evitare falsi positivi
-            if max_score >= 0.68 and best_name:
+            # Soglia di affinità bilanciata al 52%
+            if max_score >= 0.52 and best_name:
                 matches.append({
                     "dipendente": best_name,
                     "score": round(float(max_score * 100), 1)
