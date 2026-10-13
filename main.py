@@ -62,8 +62,8 @@ async def scan_sheet(request: Request):
             f"Sei un assistente AI specializzato nell'analisi di fogli di presenze e firme.\n"
             f"I dipendenti registrati nell'anagrafica sono: {', '.join(dipendenti_list)}.\n\n"
             f"Analizza l'immagine fornita (foglio di firma) ed individua quali tra questi dipendenti "
-            f"hanno una firma apposta all'interno del foglio.\n"
-            f"Rispondi ESCLUSIVAMENTE con un oggetto JSON valido con questo formato preciso e nessun testo aggiuntivo:\n"
+            f"hanno una firma o presenza rilevata nel foglio.\n"
+            f"Rispondi ESCLUSIVAMENTE con un oggetto JSON valido con questo formato preciso e nessun altro testo:\n"
             f'{{"presenti": ["Nome1", "Nome2"]}}'
         )
 
@@ -72,12 +72,11 @@ async def scan_sheet(request: Request):
             "Content-Type": "application/json"
         }
 
-        # Nomi modello vision correnti supportati da Groq Cloud
+        # Modelli Vision correnti supportati da Groq (Qwen 3.8 27B)
         vision_models = [
-            "llama-3.2-11b-vision-preview",
-            "llama-3.2-90b-vision-preview",
-            "meta-llama/llama-3.2-11b-vision-instruct",
-            "meta-llama/llama-3.2-90b-vision-instruct"
+            "qwen/qwen3.8-27b",
+            "llama-3.2-11b-vision-instruct",
+            "llama-3.2-90b-vision-instruct"
         ]
 
         response = None
