@@ -5,7 +5,6 @@ import numpy as np
 from PIL import Image, ImageOps
 import io
 import base64
-import json
 
 app = FastAPI(title="Fogli Firma AI Backend")
 
@@ -46,40 +45,44 @@ def extract_signature_crops(pil_img):
         gray = gray.resize((int(w * scale), int(h * scale)))
     
     img_np = np.array(gray)
-    threshold = np.mean(img_np) * 0.85
+    # Filtra il fondo bianco per isolare meglio i tratti a penna scuri
+    threshold = np.mean(img_np) * 0.75
     binary = (img_np < threshold).astype(np.uint8)
 
     curr_h, curr_w = binary.shape
     crops = []
     
     row_sums = np.sum(binary, axis=1)
-    threshold_row = np.mean(row_sums) * 0.3
+    threshold_row = np.mean(row_sums) * 0.4
     active_rows = np.where(row_sums > threshold_row)[0]
 
     if len(active_rows) > 0:
         y_min, y_max = active_rows[0], active_rows[-1]
-        step = max(30, int((y_max - y_min) / 6))
+        step = max(35, int((y_max - y_min) / 8))
         
         for y in range(y_min, y_max, step):
             band = binary[y:min(y+step, curr_h), :]
             col_sums = np.sum(band, axis=0)
-            active_cols = np.where(col_sums > 2)[0]
+            active_cols = np.where(col_sums > 4)[0]
             
             if len(active_cols) > 0:
                 x_min, x_max = active_cols[0], active_cols[-1]
                 w_box = x_max - x_min
                 h_box = band.shape[0]
                 
-                if w_box > 25 and h_box > 15:
+                # Ignora rettangoli troppo piccoli o sproporzionati (linee o righe)
+                if w_box > 40 and h_box > 20 and (w_box / max(1, h_box)) < 6:
                     crop_np = binary[y:y+h_box, x_min:x_max]
-                    crops.append(crop_np)
+                    # Verifica che contenga abbastanza pixel scuri da essere una firma vera
+                    if np.sum(crop_np) > 80:
+                        crops.append(crop_np)
 
     return crops
 
 def get_feature_vector(binary_array):
     img = Image.fromarray((binary_array * 255).astype(np.uint8))
     img_resized = img.resize((64, 64), Image.Resampling.BILINEAR)
-    vec = np.array(img_resized) > 100
+    vec = np.array(img_resized) > 120
     return vec.astype(np.float32)
 
 @app.post("/scan-sheet")
@@ -126,7 +129,7 @@ async def scan_sheet(request: Request):
                     sample_pil = Image.open(io.BytesIO(sample_bytes))
                     sample_gray = sample_pil.convert("RGB").convert("L")
                     
-                    sample_np = np.array(sample_gray) < 160
+                    sample_np = np.array(sample_gray) < 140
                     sample_vec = get_feature_vector(sample_np)
 
                     intersection = np.sum(crop_vec * sample_vec)
@@ -140,7 +143,8 @@ async def scan_sheet(request: Request):
                 except Exception:
                     continue
 
-            if max_score >= 0.50 and best_name:
+            # Aumentiamo la soglia minima di affinità al 68% per evitare falsi positivi
+            if max_score >= 0.68 and best_name:
                 matches.append({
                     "dipendente": best_name,
                     "score": round(float(max_score * 100), 1)
