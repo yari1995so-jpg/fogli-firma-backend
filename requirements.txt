@@ -3,4 +3,3 @@ uvicorn
 numpy
 python-multipart
 pillow
-scikit-image
