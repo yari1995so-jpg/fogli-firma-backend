@@ -51,10 +51,8 @@ async def scan_sheet(request: Request):
                 content={"status": "error", "message": "Parametri mancanti nella richiesta."}
             )
 
-        # Prepara la lista di nomi ed esempi per il prompt vision
         dipendenti_list = [sig.get("dipendente", "") for sig in db_signatures if sig.get("dipendente")]
         
-        # Formatta l'immagine base64 per la chiamata all'API Vision
         if not image_base64.startswith("data:image"):
             image_url = f"data:image/jpeg;base64,{image_base64}"
         else:
@@ -74,33 +72,51 @@ async def scan_sheet(request: Request):
             "Content-Type": "application/json"
         }
 
-        payload = {
-            "model": "llama-3.2-11b-vision-preview",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt_text},
-                        {"type": "image_url", "image_url": {"url": image_url}}
-                    ]
-                }
-            ],
-            "temperature": 0.1,
-            "max_tokens": 300,
-            "response_format": {"type": "json_object"}
-        }
+        # Modelli Vision disponibili in ordine di fallback
+        vision_models = [
+            "llama-3.2-11b-vision-instruct",
+            "llama-3.2-90b-vision-instruct",
+            "llama-3.2-11b-vision",
+            "llama-3.2-90b-vision"
+        ]
 
-        response = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=25
-        )
+        response = None
+        last_err = ""
 
-        if response.status_code != 200:
+        for model_name in vision_models:
+            payload = {
+                "model": model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_text},
+                            {"type": "image_url", "image_url": {"url": image_url}}
+                        ]
+                    }
+                ],
+                "temperature": 0.1,
+                "max_tokens": 300,
+                "response_format": {"type": "json_object"}
+            }
+
+            res = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=25
+            )
+
+            if res.status_code == 200:
+                response = res
+                break
+            else:
+                last_err = res.text
+
+        if not response:
             return JSONResponse(
                 status_code=200,
-                content={"status": "error", "message": f"Errore API Vision: {response.text}"}
+                content={"status": "error", "message": f"Errore API Vision: {last_err}"}
             )
 
         res_json = response.json()
