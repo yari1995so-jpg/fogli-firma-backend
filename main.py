@@ -1,9 +1,12 @@
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
-import cv2
 import numpy as np
+from PIL import Image, ImageOps
+from skimage.measure import label, regionprops
+import io
 import base64
 import json
+import traceback
 
 app = FastAPI(title="Fogli Firma AI Backend")
 
@@ -19,36 +22,48 @@ app.add_middleware(
 def read_root():
     return {"status": "online", "message": "Fogli Firma AI Backend Operativo"}
 
-def extract_signature_crops(image_np):
-    gray = cv2.cvtColor(image_np, cv2.COLOR_BGR2GRAY)
+def process_and_extract_crops(pil_img):
+    # Applica orientamento EXIF per foto scattate da iPhone/Android
+    try:
+        pil_img = ImageOps.exif_transpose(pil_img)
+    except Exception:
+        pass
+
+    # Converti sempre prima in RGB e poi in scala di grigi per evitare crash su PNG con Alpha o HEIC
+    gray = pil_img.convert("RGB").convert("L")
     
-    # Ridimensiona l'immagine se supera i 1200px per velocizzare il processo e risparmiare RAM
-    h, w = gray.shape
-    if max(h, w) > 1200:
-        scale = 1200.0 / max(h, w)
-        gray = cv2.resize(gray, (0, 0), fx=scale, fy=scale)
+    w, h = gray.size
+    if max(w, h) > 1000:
+        scale = 1000.0 / max(w, h)
+        gray = gray.resize((int(w * scale), int(h * scale)))
+    
+    img_np = np.array(gray)
+    
+    threshold = np.mean(img_np) * 0.85
+    binary = img_np < threshold
 
-    thresh = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 10
-    )
+    labeled = label(binary)
+    regions = regionprops(labeled)
 
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     crops = []
-    curr_h, curr_w = gray.shape
+    curr_h, curr_w = img_np.shape
 
-    for cnt in contours:
-        x, y, w_box, h_box = cv2.boundingRect(cnt)
-        # Filtra i contorni troppo piccoli (rumore) o troppo grandi (intere tabelle)
-        if w_box > 40 and h_box > 20 and w_box < curr_w * 0.75 and h_box < curr_h * 0.4:
-            crop = gray[y:y+h_box, x:x+w_box]
-            crops.append(crop)
+    for reg in regions:
+        min_y, min_x, max_y, max_x = reg.bbox
+        w_box = max_x - min_x
+        h_box = max_y - min_y
+
+        if w_box > 30 and h_box > 15 and w_box < curr_w * 0.8 and h_box < curr_h * 0.5:
+            crop_np = binary[min_y:max_y, min_x:max_x]
+            crops.append(crop_np)
 
     return crops
 
-def get_grid_vector(gray_crop):
-    resized = cv2.resize(gray_crop, (64, 64), interpolation=cv2.INTER_AREA)
-    _, binary = cv2.threshold(resized, 150, 255, cv2.THRESH_BINARY_INV)
-    return (binary > 0).astype(np.float32)
+def get_feature_vector(binary_array):
+    img = Image.fromarray((binary_array * 255).astype(np.uint8))
+    img_resized = img.resize((64, 64), Image.Resampling.BILINEAR)
+    vec = np.array(img_resized) > 100
+    return vec.astype(np.float32)
 
 @app.post("/scan-sheet")
 async def scan_sheet(
@@ -57,27 +72,39 @@ async def scan_sheet(
 ):
     try:
         contents = await file.read()
-        nparr = np.frombuffer(contents, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-        db_signatures = json.loads(db_signatures_json)
-        found_crops = extract_signature_crops(image)
         
+        try:
+            pil_img = Image.open(io.BytesIO(contents))
+        except Exception as img_err:
+            return {"status": "error", "message": f"Formato immagine non supportato: {str(img_err)}"}
+
+        try:
+            db_signatures = json.loads(db_signatures_json)
+        except Exception:
+            return {"status": "error", "message": "Anagrafica firme non valida."}
+
+        found_crops = process_and_extract_crops(pil_img)
         matches = []
 
         for crop in found_crops:
-            crop_vec = get_grid_vector(crop)
+            crop_vec = get_feature_vector(crop)
             best_name = None
             max_score = 0.0
 
             for sig in db_signatures:
                 try:
-                    sample_data = sig["dataUrl"].split(",")[1]
+                    raw_data = sig.get("dataUrl", "")
+                    if "," in raw_data:
+                        sample_data = raw_data.split(",")[1]
+                    else:
+                        sample_data = raw_data
+
                     sample_bytes = base64.b64decode(sample_data)
-                    sample_np = np.frombuffer(sample_bytes, np.uint8)
-                    sample_img = cv2.imdecode(sample_np, cv2.IMREAD_GRAYSCALE)
+                    sample_pil = Image.open(io.BytesIO(sample_bytes))
+                    sample_gray = sample_pil.convert("RGB").convert("L")
                     
-                    sample_vec = get_grid_vector(sample_img)
+                    sample_np = np.array(sample_gray) < 160
+                    sample_vec = get_feature_vector(sample_np)
 
                     intersection = np.sum(crop_vec * sample_vec)
                     total = np.sum(crop_vec) + np.sum(sample_vec)
@@ -86,18 +113,17 @@ async def scan_sheet(
                         score = (2.0 * intersection) / total
                         if score > max_score:
                             max_score = score
-                            best_name = sig["dipendente"]
+                            best_name = sig.get("dipendente", "Sconosciuto")
                 except Exception:
                     continue
 
-            # Soglia del 65% per il riconoscimento da foglio intero
-            if max_score >= 0.65 and best_name:
+            # Soglia di corrispondenza al 55%
+            if max_score >= 0.55 and best_name:
                 matches.append({
                     "dipendente": best_name,
                     "score": round(float(max_score * 100), 1)
                 })
 
-        # Mantiene il punteggio più alto per dipendente
         unique = {}
         for m in matches:
             nome = m["dipendente"]
@@ -107,4 +133,5 @@ async def scan_sheet(
         return {"status": "success", "matches": list(unique.values())}
 
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        print("CRASH SERVER:", traceback.format_exc())
+        return {"status": "error", "message": f"Errore interno del server: {str(e)}"}
