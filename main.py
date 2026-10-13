@@ -59,12 +59,16 @@ async def scan_sheet(request: Request):
             image_url = image_base64
 
         prompt_text = (
-            f"Sei un assistente AI specializzato nell'analisi di fogli di presenze e firme.\n"
-            f"I dipendenti registrati nell'anagrafica sono: {', '.join(dipendenti_list)}.\n\n"
-            f"Analizza l'immagine fornita (foglio di firma) ed individua quali tra questi dipendenti "
-            f"hanno una firma o presenza rilevata nel foglio.\n"
-            f"Rispondi ESCLUSIVAMENTE con un oggetto JSON valido con questo formato preciso e nessun altro testo:\n"
-            f'{{"presenti": ["Nome1", "Nome2"]}}'
+            f"Sei un ispettore di sicurezza estremamente rigoroso nell'analisi di fogli di presenza aziendali.\n"
+            f"Ecco la lista completa dell'anagrafica dipendenti da verificare: {', '.join(dipendenti_list)}.\n\n"
+            f"REGOLE DI ANALISI SEVERISSIME:\n"
+            f"1. Guarda attentamente l'immagine del foglio allegato.\n"
+            f"2. Cerca SOLO le firme autografe, sigle o scritte a penna apposte sul foglio.\n"
+            f"3. NON inserire un dipendente nella lista dei presenti solo perché il suo nome appare nell'anagrafica o nel testo stampato.\n"
+            f"4. Se una casella è vuota o NON contiene una firma scritta a mano ben visibile, considera quel dipendente ASSENTE.\n"
+            f"5. Se non vedi NESSUNA firma a penna, la lista 'presenti' deve essere vuota [].\n\n"
+            f"Rispondi ESCLUSIVAMENTE con un oggetto JSON valido in questo formato preciso e senza alcun altro commento:\n"
+            f'{{"presenti": ["Nome Cognome Esatto"]}}'
         )
 
         headers = {
@@ -72,11 +76,11 @@ async def scan_sheet(request: Request):
             "Content-Type": "application/json"
         }
 
-        # Modelli Vision correnti supportati da Groq (Qwen 3.8 27B)
+        # Modelli Vision in ordine di priorità
         vision_models = [
-            "qwen/qwen3.8-27b",
-            "llama-3.2-11b-vision-instruct",
-            "llama-3.2-90b-vision-instruct"
+            "llama-3.2-11b-vision-preview",
+            "llama-3.2-90b-vision-preview",
+            "meta-llama/llama-3.2-11b-vision-instruct"
         ]
 
         response = None
@@ -94,8 +98,8 @@ async def scan_sheet(request: Request):
                         ]
                     }
                 ],
-                "temperature": 0.1,
-                "max_tokens": 300,
+                "temperature": 0.0,  # Zero per garantire la massima determinazione senza invenzioni
+                "max_tokens": 250,
                 "response_format": {"type": "json_object"}
             }
 
@@ -126,10 +130,14 @@ async def scan_sheet(request: Request):
         
         matches = []
         for nome in presenti:
-            matches.append({
-                "dipendente": nome,
-                "score": 98.0
-            })
+            # Filtra per garantire che il nome restituito faccia parte dell'anagrafica reale
+            for dip_real in dipendenti_list:
+                if dip_real.lower() in nome.lower() or nome.lower() in dip_real.lower():
+                    matches.append({
+                        "dipendente": dip_real,
+                        "score": 98.0
+                    })
+                    break
 
         return JSONResponse(
             status_code=200,
