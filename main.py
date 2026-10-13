@@ -9,7 +9,6 @@ import json
 
 app = FastAPI(title="Fogli Firma AI Backend")
 
-# Abilita CORS completo per qualsiasi origine (Netlify, localhost, PWA)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -47,7 +46,6 @@ def extract_signature_crops(pil_img):
         gray = gray.resize((int(w * scale), int(h * scale)))
     
     img_np = np.array(gray)
-    
     threshold = np.mean(img_np) * 0.85
     binary = (img_np < threshold).astype(np.uint8)
 
@@ -85,12 +83,20 @@ def get_feature_vector(binary_array):
     return vec.astype(np.float32)
 
 @app.post("/scan-sheet")
-async def scan_sheet(
-    file: UploadFile = File(...),
-    db_signatures_json: str = Form(...)
-):
+async def scan_sheet(request: Request):
     try:
-        contents = await file.read()
+        form = await request.form()
+        
+        uploaded_file = form.get("file")
+        db_signatures_json = form.get("db_signatures_json")
+
+        if not uploaded_file or not db_signatures_json:
+            return JSONResponse(
+                status_code=200,
+                content={"status": "error", "message": "Parametri mancanti nella richiesta."}
+            )
+
+        contents = await uploaded_file.read()
         
         try:
             pil_img = Image.open(io.BytesIO(contents))
