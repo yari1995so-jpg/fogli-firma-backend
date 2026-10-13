@@ -72,12 +72,12 @@ async def scan_sheet(request: Request):
             "Content-Type": "application/json"
         }
 
-        # Modelli Vision disponibili in ordine di fallback
+        # Nomi modello vision correnti supportati da Groq Cloud
         vision_models = [
-            "llama-3.2-11b-vision-instruct",
-            "llama-3.2-90b-vision-instruct",
-            "llama-3.2-11b-vision",
-            "llama-3.2-90b-vision"
+            "llama-3.2-11b-vision-preview",
+            "llama-3.2-90b-vision-preview",
+            "meta-llama/llama-3.2-11b-vision-instruct",
+            "meta-llama/llama-3.2-90b-vision-instruct"
         ]
 
         response = None
