@@ -1,14 +1,15 @@
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, File, UploadFile, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import numpy as np
 from PIL import Image, ImageOps
 import io
 import base64
 import json
-import traceback
 
 app = FastAPI(title="Fogli Firma AI Backend")
 
+# Abilita CORS completo per qualsiasi origine (Netlify, localhost, PWA)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,6 +17,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.options("/{full_path:path}")
+async def options_handler(full_path: str):
+    return JSONResponse(
+        content="OK",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "*",
+            "Access-Control-Allow-Headers": "*",
+        },
+    )
 
 @app.get("/")
 def read_root():
@@ -36,11 +48,9 @@ def extract_signature_crops(pil_img):
     
     img_np = np.array(gray)
     
-    # Binarizzazione
     threshold = np.mean(img_np) * 0.85
     binary = (img_np < threshold).astype(np.uint8)
 
-    # Estrazione regioni tramite griglia dinamica (Zero librerie esterne pesanti)
     curr_h, curr_w = binary.shape
     crops = []
     
@@ -85,12 +95,18 @@ async def scan_sheet(
         try:
             pil_img = Image.open(io.BytesIO(contents))
         except Exception as img_err:
-            return {"status": "error", "message": f"Formato immagine non valido: {str(img_err)}"}
+            return JSONResponse(
+                status_code=200,
+                content={"status": "error", "message": f"Formato immagine non valido: {str(img_err)}"}
+            )
 
         try:
             db_signatures = json.loads(db_signatures_json)
         except Exception:
-            return {"status": "error", "message": "Anagrafica firme non valida."}
+            return JSONResponse(
+                status_code=200,
+                content={"status": "error", "message": "Anagrafica firme non valida."}
+            )
 
         found_crops = extract_signature_crops(pil_img)
         matches = []
@@ -135,7 +151,13 @@ async def scan_sheet(
             if nome not in unique or m["score"] > unique[nome]["score"]:
                 unique[nome] = m
 
-        return {"status": "success", "matches": list(unique.values())}
+        return JSONResponse(
+            status_code=200,
+            content={"status": "success", "matches": list(unique.values())}
+        )
 
     except Exception as e:
-        return {"status": "error", "message": f"Errore interno: {str(e)}"}
+        return JSONResponse(
+            status_code=200,
+            content={"status": "error", "message": f"Errore interno: {str(e)}"}
+        )
