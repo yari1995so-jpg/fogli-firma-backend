@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Form, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import numpy as np
@@ -85,33 +85,28 @@ def get_feature_vector(binary_array):
 @app.post("/scan-sheet")
 async def scan_sheet(request: Request):
     try:
-        form = await request.form()
+        data = await request.json()
         
-        uploaded_file = form.get("file")
-        db_signatures_json = form.get("db_signatures_json")
+        image_base64 = data.get("file_base64")
+        db_signatures = data.get("signatures", [])
 
-        if not uploaded_file or not db_signatures_json:
+        if not image_base64 or not db_signatures:
             return JSONResponse(
                 status_code=200,
                 content={"status": "error", "message": "Parametri mancanti nella richiesta."}
             )
 
-        contents = await uploaded_file.read()
+        if "," in image_base64:
+            image_base64 = image_base64.split(",")[1]
+
+        image_bytes = base64.b64decode(image_base64)
         
         try:
-            pil_img = Image.open(io.BytesIO(contents))
+            pil_img = Image.open(io.BytesIO(image_bytes))
         except Exception as img_err:
             return JSONResponse(
                 status_code=200,
                 content={"status": "error", "message": f"Formato immagine non valido: {str(img_err)}"}
-            )
-
-        try:
-            db_signatures = json.loads(db_signatures_json)
-        except Exception:
-            return JSONResponse(
-                status_code=200,
-                content={"status": "error", "message": "Anagrafica firme non valida."}
             )
 
         found_crops = extract_signature_crops(pil_img)
