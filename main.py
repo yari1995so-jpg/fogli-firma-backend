@@ -76,53 +76,39 @@ async def scan_sheet(request: Request):
             "Content-Type": "application/json"
         }
 
-        # Modelli Vision in ordine di priorità
-        vision_models = [
-            "llama-3.2-11b-vision-preview",
-            "llama-3.2-90b-vision-preview",
-            "meta-llama/llama-3.2-11b-vision-instruct"
-        ]
+        # Modello Vision Ufficiale e Attivo su Groq
+        model_name = "qwen/qwen3.8-27b"
 
-        response = None
-        last_err = ""
+        payload = {
+            "model": model_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {"type": "image_url", "image_url": {"url": image_url}}
+                    ]
+                }
+            ],
+            "temperature": 0.0,
+            "max_tokens": 300,
+            "response_format": {"type": "json_object"}
+        }
 
-        for model_name in vision_models:
-            payload = {
-                "model": model_name,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt_text},
-                            {"type": "image_url", "image_url": {"url": image_url}}
-                        ]
-                    }
-                ],
-                "temperature": 0.0,  # Zero per garantire la massima determinazione senza invenzioni
-                "max_tokens": 250,
-                "response_format": {"type": "json_object"}
-            }
+        res = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=25
+        )
 
-            res = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=25
-            )
-
-            if res.status_code == 200:
-                response = res
-                break
-            else:
-                last_err = res.text
-
-        if not response:
+        if res.status_code != 200:
             return JSONResponse(
                 status_code=200,
-                content={"status": "error", "message": f"Errore API Vision: {last_err}"}
+                content={"status": "error", "message": f"Errore API Vision ({res.status_code}): {res.text}"}
             )
 
-        res_json = response.json()
+        res_json = res.json()
         raw_reply = res_json['choices'][0]['message']['content']
         parsed_reply = json.loads(raw_reply)
 
@@ -130,7 +116,6 @@ async def scan_sheet(request: Request):
         
         matches = []
         for nome in presenti:
-            # Filtra per garantire che il nome restituito faccia parte dell'anagrafica reale
             for dip_real in dipendenti_list:
                 if dip_real.lower() in nome.lower() or nome.lower() in dip_real.lower():
                     matches.append({
