@@ -93,10 +93,9 @@ async def scan_sheet(request: Request):
         }
 
         # Modelli ufficiali di Google Gemini Vision
-        candidate_models = [
-            "gemini-1.5-flash",
-            "gemini-1.5-pro"
-        ]
+    candidate_models = [
+    "gemini-3.8-flash"
+]
 
         parsed_reply = None
         last_error = ""
