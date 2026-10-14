@@ -49,7 +49,7 @@ async def scan_sheet(request: Request):
         if not image_base64 or not db_signatures:
             return JSONResponse(
                 status_code=200,
-                content={"status": "error", "message": "Dati o immagine mancanti."}
+                content={"status": "error", "message": "Dati o immagine mancanti nella richiesta."}
             )
 
         dipendenti_list = [sig.get("dipendente", "") for sig in db_signatures if sig.get("dipendente")]
@@ -63,17 +63,16 @@ async def scan_sheet(request: Request):
                 mime_type = "image/png"
 
         prompt_text = (
-            f"Sei un ispettore di sicurezza. Analizza il foglio di presenza in foto.\n"
-            f"Dipendenti in anagrafica: {', '.join(dipendenti_list)}.\n\n"
-            f"REGOLE:\n"
-            f"1. Cerca soltanto firme a mano o sigle a penna.\n"
-            f"2. Se un dipendente ha firmato a penna, inseriscilo nella lista 'presenti'.\n"
-            f"3. Se non c'è firma a penna, la lista deve essere vuota.\n\n"
-            f"Rispondi SOLO ed ESCLUSIVAMENTE con questo JSON senza altro testo:\n"
+            f"Sei un ispettore di sicurezza. Analizza la foto del foglio di presenza/firme allegato.\n"
+            f"Dipendenti registrati in anagrafica: {', '.join(dipendenti_list)}.\n\n"
+            f"REGOLE RIGIDE:\n"
+            f"1. Cerca soltanto firme scritte a mano, sigle o tratti a penna nella pagina.\n"
+            f"2. Se un dipendente ha una firma scritta a mano visibile vicino al suo nome o nella casella corrispondente, inseriscilo tra i 'presenti'.\n"
+            f"3. Se il nome è solo stampato a macchina senza firma a penna, considera il dipendente ASSENTE.\n"
+            f"4. Se non vedi alcuna firma a penna, la lista 'presenti' deve essere vuota.\n\n"
+            f"Rispondi ESCLUSIVAMENTE con un oggetto JSON in questo formato preciso e nessun altro testo:\n"
             f'{{"presenti": ["Nome Cognome"]}}'
         )
-
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
 
         payload = {
             "contents": [{
@@ -93,19 +92,43 @@ async def scan_sheet(request: Request):
             }
         }
 
-        res = requests.post(url, json=payload, timeout=15)
+        # Lista di URL/Modelli compatibili
+        endpoints = [
+            f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_API_KEY}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        ]
 
-        if res.status_code != 200:
+        parsed_reply = None
+        last_error_text = ""
+
+        for url in endpoints:
+            try:
+                res = requests.post(url, json=payload, timeout=20)
+                if res.status_code == 200:
+                    res_data = res.json()
+                    candidates = res_data.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        if parts:
+                            raw_text = parts[0].get("text", "").strip()
+                            if "```" in raw_text:
+                                raw_text = re.sub(r'```(?:json)?\s*', '', raw_text)
+                                raw_text = raw_text.replace('```', '').strip()
+                            parsed_reply = json.loads(raw_text)
+                            break
+                else:
+                    last_error_text = f"HTTP {res.status_code}: {res.text[:150]}"
+            except Exception as e:
+                last_error_text = str(e)
+
+        if not parsed_reply:
             return JSONResponse(
                 status_code=200,
-                content={"status": "error", "message": f"Errore Gemini {res.status_code}: {res.text[:100]}"}
+                content={"status": "error", "message": f"Errore risposta Gemini: {last_error_text}"}
             )
 
-        res_data = res.json()
-        raw_text = res_data['candidates'][0]['content']['parts'][0]['text']
-        parsed = json.loads(raw_text)
-
-        presenti = parsed.get("presenti", [])
+        presenti = parsed_reply.get("presenti", [])
         matches = []
         for nome in presenti:
             for dip_real in dipendenti_list:
