@@ -34,35 +34,38 @@ async def options_handler(full_path: str):
 
 @app.get("/")
 def read_root():
-    return {"status": "online", "message": "Fogli Firma AI Backend Operativo con Gemini Vision"}
+    return {"status": "online", "message": "Fogli Firma AI Backend Operativo con Gemini"}
 
 def process_base64_image(base64_str):
     mime_type = "image/jpeg"
+    clean_b64 = base64_str
+
     if "," in base64_str:
-        header, base64_str = base64_str.split(",", 1)
+        header, clean_b64 = base64_str.split(",", 1)
         if "png" in header:
             mime_type = "image/png"
             
     try:
-        img_bytes = base64.b64decode(base64_str)
+        img_bytes = base64.b64decode(clean_b64)
         img = Image.open(io.BytesIO(img_bytes))
         if img.mode != 'RGB':
             img = img.convert('RGB')
         img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=80)
-        clean_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-        return clean_b64, "image/jpeg"
+        final_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+        return final_b64, "image/jpeg"
     except Exception:
-        return base64_str, mime_type
+        return clean_b64, mime_type
 
 @app.post("/scan-sheet")
 async def scan_sheet(request: Request):
     try:
-        if not GEMINI_API_KEY:
+        api_key = GEMINI_API_KEY.strip()
+        if not api_key:
             return JSONResponse(
                 status_code=200,
-                content={"status": "error", "message": "Chiave GEMINI_API_KEY non configurata su Render!"}
+                content={"status": "error", "message": "Chiave GEMINI_API_KEY non trovata nelle variabili d'ambiente di Render!"}
             )
 
         data = await request.json()
@@ -76,57 +79,75 @@ async def scan_sheet(request: Request):
             )
 
         dipendenti_list = [sig.get("dipendente", "") for sig in db_signatures if sig.get("dipendente")]
-        
         b64_data, mime_type = process_base64_image(image_base64)
 
         prompt_text = (
             f"Sei un ispettore aziendale rigoroso. Analizza la foto del foglio di presenza/firme allegato.\n"
-            f"Elenco dei dipendenti registrati in anagrafica: {', '.join(dipendenti_list)}.\n\n"
-            f"ISTRUZIONI RIGIDE:\n"
+            f"Anagrafica dipendenti registrati: {', '.join(dipendenti_list)}.\n\n"
+            f"REGOLE RIGIDE:\n"
             f"1. Cerca soltanto firme scritte a mano, sigle o tratti a penna nella pagina.\n"
             f"2. Se un dipendente ha una firma scritta a mano visibile vicino al suo nome o nella casella corrispondente, inseriscilo tra i 'presenti'.\n"
             f"3. Se il nome è solo stampato a macchina senza firma a penna, considera il dipendente ASSENTE.\n"
             f"4. Se non vedi alcuna firma a penna, la lista 'presenti' deve essere vuota.\n\n"
-            f"Rispondi ESCLUSIVAMENTE con un oggetto JSON con questa struttura esatta e senza altro testo:\n"
+            f"Rispondi ESCLUSIVAMENTE con un oggetto JSON valido con questo formato preciso e nessun testo aggiuntivo:\n"
             f'{{"presenti": ["Nome Cognome"]}}'
         )
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY.strip()}"
+        # Prova sia Gemini 1.5 Flash che Gemini 2.0 Flash
+        models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash"]
+        
+        parsed_reply = None
+        last_error = ""
 
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {"text": prompt_text},
-                        {
-                            "inline_data": {
-                                "mime_type": mime_type,
-                                "data": b64_data
+        for model_name in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+            payload = {
+                "contents": [
+                    {
+                        "parts": [
+                            {"text": prompt_text},
+                            {
+                                "inline_data": {
+                                    "mime_type": mime_type,
+                                    "data": b64_data
+                                }
                             }
-                        }
-                    ]
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.0,
+                    "response_mime_type": "application/json"
                 }
-            ],
-            "generationConfig": {
-                "temperature": 0.0,
-                "response_mime_type": "application/json"
             }
-        }
 
-        res = requests.post(url, json=payload, timeout=25)
+            try:
+                res = requests.post(url, json=payload, timeout=25)
+                if res.status_code == 200:
+                    res_json = res.json()
+                    candidates = res_json.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        if parts:
+                            raw_text = parts[0].get("text", "").strip()
+                            # Pulizia eventuale blocco markdown
+                            if "```" in raw_text:
+                                raw_text = re.sub(r'```(?:json)?\s*', '', raw_text)
+                                raw_text = raw_text.replace('```', '').strip()
+                            parsed_reply = json.loads(raw_text)
+                            break
+                else:
+                    last_error = f"Model {model_name} HTTP {res.status_code}: {res.text[:150]}"
+            except Exception as err:
+                last_error = f"Error with {model_name}: {str(err)}"
 
-        if res.status_code != 200:
+        if not parsed_reply:
             return JSONResponse(
                 status_code=200,
-                content={"status": "error", "message": f"Errore Google Gemini ({res.status_code}): {res.text[:200]}"}
+                content={"status": "error", "message": f"Errore risposta Gemini: {last_error}"}
             )
 
-        res_json = res.json()
-        raw_text = res_json['candidates'][0]['content']['parts'][0]['text']
-        parsed_reply = json.loads(raw_text)
-
         presenti = parsed_reply.get("presenti", [])
-        
         matches = []
         for nome in presenti:
             for dip_real in dipendenti_list:
@@ -145,5 +166,5 @@ async def scan_sheet(request: Request):
     except Exception as e:
         return JSONResponse(
             status_code=200,
-            content={"status": "error", "message": f"Errore server: {str(e)}"}
+            content={"status": "error", "message": f"Errore generale server: {str(e)}"}
         )
