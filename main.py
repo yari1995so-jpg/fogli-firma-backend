@@ -3,8 +3,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import requests
 import json
+import base64
 import re
 import os
+import io
+from PIL import Image
 
 app = FastAPI(title="Fogli Firma AI Backend")
 
@@ -33,6 +36,31 @@ async def options_handler(full_path: str):
 def read_root():
     return {"status": "online", "message": "Fogli Firma AI Backend Operativo"}
 
+def compress_base64_image(base64_str, max_size=(1024, 1024)):
+    """Ridimensiona e comprime l'immagine per rientrare nei limiti dell'API Groq."""
+    try:
+        if "," in base64_str:
+            base64_str = base64_str.split(",")[1]
+            
+        img_data = base64.b64decode(base64_str)
+        img = Image.open(io.BytesIO(img_data))
+        
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+            
+        img.thumbnail(max_size, Image.Resampling.LANCZOS)
+        
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=75)
+        compressed_bytes = buffer.getvalue()
+        
+        encoded = base64.b64encode(compressed_bytes).decode('utf-8')
+        return f"data:image/jpeg;base64,{encoded}"
+    except Exception as e:
+        if not base64_str.startswith("data:image"):
+            return f"data:image/jpeg;base64,{base64_str}"
+        return base64_str
+
 @app.post("/scan-sheet")
 async def scan_sheet(request: Request):
     try:
@@ -54,13 +82,11 @@ async def scan_sheet(request: Request):
 
         dipendenti_list = [sig.get("dipendente", "") for sig in db_signatures if sig.get("dipendente")]
         
-        if not image_base64.startswith("data:image"):
-            image_url = f"data:image/jpeg;base64,{image_base64}"
-        else:
-            image_url = image_base64
+        # Comprime l'immagine per l'invio sicuro via API
+        optimized_image_url = compress_base64_image(image_base64)
 
         prompt_text = (
-            f"Sei un ispettore di sicurezza rigoroso nell'analisi di fogli di presenza aziendali.\n"
+            f"Sei un ispettore di sicurezza nell'analisi di fogli di presenza aziendali.\n"
             f"Anagrafica dipendenti: {', '.join(dipendenti_list)}.\n\n"
             f"REGOLE RIGIDE:\n"
             f"1. Analizza il foglio allegato.\n"
@@ -72,19 +98,18 @@ async def scan_sheet(request: Request):
         )
 
         headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Authorization": f"Bearer {GROQ_API_KEY.strip()}",
             "Content-Type": "application/json"
         }
 
-        # Modelli Vision disponibili su Groq Cloud
+        # Modelli Vision correnti Groq
         vision_models = [
             "llama-3.2-11b-vision-preview",
-            "llama-3.2-90b-vision-preview",
-            "qwen/qwen3.8-27b"
+            "llama-3.2-90b-vision-preview"
         ]
 
         parsed_reply = None
-        last_error_msg = ""
+        last_error_details = ""
 
         for model_name in vision_models:
             payload = {
@@ -94,7 +119,7 @@ async def scan_sheet(request: Request):
                         "role": "user",
                         "content": [
                             {"type": "text", "text": prompt_text},
-                            {"type": "image_url", "image_url": {"url": image_url}}
+                            {"type": "image_url", "image_url": {"url": optimized_image_url}}
                         ]
                     }
                 ],
@@ -104,22 +129,20 @@ async def scan_sheet(request: Request):
 
             try:
                 res = requests.post(
-                    "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)",
+                    "https://api.groq.com/openai/v1/chat/completions",
                     headers=headers,
                     json=payload,
-                    timeout=25
+                    timeout=20
                 )
 
                 if res.status_code == 200:
                     res_json = res.json()
                     raw_reply = res_json['choices'][0]['message']['content'].strip()
                     
-                    # Pulizia da blocchi markdown ```json ... ```
                     if "```" in raw_reply:
                         raw_reply = re.sub(r'```(?:json)?\s*', '', raw_reply)
                         raw_reply = raw_reply.replace('```', '').strip()
                     
-                    # Estrazione sicura della prima struttura JSON valida
                     json_match = re.search(r'\{.*\}', raw_reply, re.DOTALL)
                     if json_match:
                         raw_reply = json_match.group(0)
@@ -127,14 +150,14 @@ async def scan_sheet(request: Request):
                     parsed_reply = json.loads(raw_reply)
                     break
                 else:
-                    last_error_msg = f"HTTP {res.status_code}: {res.text}"
-            except Exception as parse_err:
-                last_error_msg = f"Parsing error su {model_name}: {str(parse_err)}"
+                    last_error_details = f"Modello {model_name} -> HTTP {res.status_code}: {res.text[:200]}"
+            except Exception as ex:
+                last_error_details = f"Errore chiamata/parsing su {model_name}: {str(ex)}"
 
         if parsed_reply is None:
             return JSONResponse(
                 status_code=200,
-                content={"status": "error", "message": f"Impossibile analizzare l'immagine: {last_error_msg}"}
+                content={"status": "error", "message": f"Dettagli errore Groq API: {last_error_details}"}
             )
 
         presenti = parsed_reply.get("presenti", [])
