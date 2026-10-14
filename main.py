@@ -92,8 +92,8 @@ async def scan_sheet(request: Request):
             }
         }
 
-        # Modelli ufficiali di Google Gemini Vision
-          candidate_models = [
+                # Modelli Gemini
+        candidate_models = [
             "gemini-2.5-flash"
         ]
 
