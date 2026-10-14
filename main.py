@@ -94,7 +94,7 @@ async def scan_sheet(request: Request):
 
                 # Modelli Gemini
         candidate_models = [
-            "gemini-2.5-flash"
+            "gemini-3.8-flash"
         ]
 
         parsed_reply = None
