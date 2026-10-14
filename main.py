@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import requests
 import json
+import re
 import os
 
 app = FastAPI(title="Fogli Firma AI Backend")
@@ -59,16 +60,15 @@ async def scan_sheet(request: Request):
             image_url = image_base64
 
         prompt_text = (
-            f"Sei un ispettore di sicurezza estremamente rigoroso nell'analisi di fogli di presenza aziendali.\n"
-            f"Ecco la lista completa dell'anagrafica dipendenti da verificare: {', '.join(dipendenti_list)}.\n\n"
-            f"REGOLE DI ANALISI SEVERISSIME:\n"
-            f"1. Guarda attentamente l'immagine del foglio allegato.\n"
-            f"2. Cerca SOLO le firme autografe, sigle o scritte a penna apposte sul foglio.\n"
-            f"3. NON inserire un dipendente nella lista dei presenti solo perché il suo nome appare nell'anagrafica o nel testo stampato.\n"
-            f"4. Se una casella è vuota o NON contiene una firma scritta a mano ben visibile, considera quel dipendente ASSENTE.\n"
-            f"5. Se non vedi NESSUNA firma a penna, la lista 'presenti' deve essere vuota [].\n\n"
-            f"Rispondi ESCLUSIVAMENTE con un oggetto JSON valido in questo formato preciso e senza alcun altro commento:\n"
-            f'{{"presenti": ["Nome Cognome Esatto"]}}'
+            f"Sei un ispettore di sicurezza rigoroso nell'analisi di fogli di presenza aziendali.\n"
+            f"Anagrafica dipendenti: {', '.join(dipendenti_list)}.\n\n"
+            f"REGOLE RIGIDE:\n"
+            f"1. Analizza il foglio allegato.\n"
+            f"2. Individua SOLO le firme autografe, sigle o scritte a mano presente sul foglio.\n"
+            f"3. NON inserire un dipendente nella lista dei presenti se il suo nome è solo stampato o assente.\n"
+            f"4. Se non vedi firme a mano, la lista dei presenti deve essere vuota.\n\n"
+            f"Rispondi SOLTANTO con un JSON in questo formato preciso e nessun altro testo:\n"
+            f'{{"presenti": ["Nome Cognome"]}}'
         )
 
         headers = {
@@ -76,48 +76,73 @@ async def scan_sheet(request: Request):
             "Content-Type": "application/json"
         }
 
-        # Modello Vision Ufficiale e Attivo su Groq
-        model_name = "qwen/qwen3.8-27b"
+        # Modelli Vision disponibili su Groq Cloud
+        vision_models = [
+            "llama-3.2-11b-vision-preview",
+            "llama-3.2-90b-vision-preview",
+            "qwen/qwen3.8-27b"
+        ]
 
-        payload = {
-            "model": model_name,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt_text},
-                        {"type": "image_url", "image_url": {"url": image_url}}
-                    ]
-                }
-            ],
-            "temperature": 0.0,
-            "max_tokens": 300,
-            "response_format": {"type": "json_object"}
-        }
+        parsed_reply = None
+        last_error_msg = ""
 
-        res = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=25
-        )
+        for model_name in vision_models:
+            payload = {
+                "model": model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_text},
+                            {"type": "image_url", "image_url": {"url": image_url}}
+                        ]
+                    }
+                ],
+                "temperature": 0.0,
+                "max_tokens": 300
+            }
 
-        if res.status_code != 200:
+            try:
+                res = requests.post(
+                    "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)",
+                    headers=headers,
+                    json=payload,
+                    timeout=25
+                )
+
+                if res.status_code == 200:
+                    res_json = res.json()
+                    raw_reply = res_json['choices'][0]['message']['content'].strip()
+                    
+                    # Pulizia da blocchi markdown ```json ... ```
+                    if "```" in raw_reply:
+                        raw_reply = re.sub(r'```(?:json)?\s*', '', raw_reply)
+                        raw_reply = raw_reply.replace('```', '').strip()
+                    
+                    # Estrazione sicura della prima struttura JSON valida
+                    json_match = re.search(r'\{.*\}', raw_reply, re.DOTALL)
+                    if json_match:
+                        raw_reply = json_match.group(0)
+
+                    parsed_reply = json.loads(raw_reply)
+                    break
+                else:
+                    last_error_msg = f"HTTP {res.status_code}: {res.text}"
+            except Exception as parse_err:
+                last_error_msg = f"Parsing error su {model_name}: {str(parse_err)}"
+
+        if parsed_reply is None:
             return JSONResponse(
                 status_code=200,
-                content={"status": "error", "message": f"Errore API Vision ({res.status_code}): {res.text}"}
+                content={"status": "error", "message": f"Impossibile analizzare l'immagine: {last_error_msg}"}
             )
-
-        res_json = res.json()
-        raw_reply = res_json['choices'][0]['message']['content']
-        parsed_reply = json.loads(raw_reply)
 
         presenti = parsed_reply.get("presenti", [])
         
         matches = []
         for nome in presenti:
             for dip_real in dipendenti_list:
-                if dip_real.lower() in nome.lower() or nome.lower() in dip_real.lower():
+                if dip_real.lower() in str(nome).lower() or str(nome).lower() in dip_real.lower():
                     matches.append({
                         "dipendente": dip_real,
                         "score": 98.0
@@ -132,5 +157,5 @@ async def scan_sheet(request: Request):
     except Exception as e:
         return JSONResponse(
             status_code=200,
-            content={"status": "error", "message": f"Errore analisi IA: {str(e)}"}
+            content={"status": "error", "message": f"Errore interno server: {str(e)}"}
         )
