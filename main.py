@@ -1,7 +1,10 @@
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import time
+import asyncio
+import threading
 import requests
 import json
 import re
@@ -19,6 +22,61 @@ app.add_middleware(
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
+# Limite prudente: una richiesta ogni 15 secondi.
+# Funziona per un solo processo e una sola istanza Render.
+_gemini_lock = threading.Lock()
+_next_gemini_request = 0.0
+
+
+def call_gemini(url, payload):
+    global _next_gemini_request
+
+    with _gemini_lock:
+        for attempt in range(2):
+            wait = max(
+                0.0,
+                _next_gemini_request - time.monotonic()
+            )
+            if wait:
+                time.sleep(wait)
+
+            _next_gemini_request = time.monotonic() + 15.0
+
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=40
+            )
+
+            if response.status_code not in (
+                429, 500, 502, 503, 504
+            ):
+                return response
+
+            if attempt == 0:
+                retry_after = response.headers.get(
+                    "Retry-After", ""
+                )
+                try:
+                    delay = min(
+                        60.0,
+                        max(0.0, float(retry_after))
+                    )
+                except (ValueError, TypeError):
+                    delay = (
+                        30.0
+                        if response.status_code in (429, 503)
+                        else 15.0
+                    )
+
+                _next_gemini_request = max(
+                    _next_gemini_request,
+                    time.monotonic() + delay
+                )
+
+        return response
+
+
 @app.options("/{full_path:path}")
 async def options_handler(full_path: str):
     return JSONResponse(
@@ -30,9 +88,14 @@ async def options_handler(full_path: str):
         },
     )
 
+
 @app.get("/")
 def read_root():
-    return {"status": "online", "message": "Fogli Firma AI Backend Operativo"}
+    return {
+        "status": "online",
+        "message": "Fogli Firma AI Backend Operativo"
+    }
+
 
 @app.post("/scan-sheet")
 async def scan_sheet(request: Request):
@@ -40,7 +103,10 @@ async def scan_sheet(request: Request):
         if not GEMINI_API_KEY:
             return JSONResponse(
                 status_code=200,
-                content={"status": "error", "message": "Chiave GEMINI_API_KEY non trovata su Render!"}
+                content={
+                    "status": "error",
+                    "message": "Chiave GEMINI_API_KEY non trovata su Render!"
+                }
             )
 
         data = await request.json()
@@ -50,28 +116,43 @@ async def scan_sheet(request: Request):
         if not image_base64 or not db_signatures:
             return JSONResponse(
                 status_code=200,
-                content={"status": "error", "message": "Parametri mancanti nella richiesta."}
+                content={
+                    "status": "error",
+                    "message": "Parametri mancanti nella richiesta."
+                }
             )
 
-        dipendenti_list = [sig.get("dipendente", "") for sig in db_signatures if sig.get("dipendente")]
+        dipendenti_list = [
+            sig.get("dipendente", "")
+            for sig in db_signatures
+            if sig.get("dipendente")
+        ]
 
-        # Pulizia stringa Base64
         mime_type = "image/jpeg"
         clean_b64 = image_base64
+
         if "," in image_base64:
             header, clean_b64 = image_base64.split(",", 1)
             if "png" in header:
                 mime_type = "image/png"
 
         prompt_text = (
-            f"Sei un ispettore aziendale rigoroso. Analizza la foto del foglio di presenza/firme allegato.\n"
-            f"Dipendenti registrati in anagrafica: {', '.join(dipendenti_list)}.\n\n"
+            f"Sei un ispettore aziendale rigoroso. "
+            f"Analizza la foto del foglio di presenza/firme allegato.\n"
+            f"Dipendenti registrati in anagrafica: "
+            f"{', '.join(dipendenti_list)}.\n\n"
             f"REGOLE RIGIDE:\n"
-            f"1. Cerca soltanto firme scritte a mano, sigle o tratti a penna nella pagina.\n"
-            f"2. Se un dipendente ha una firma scritta a mano visibile vicino al suo nome o nella casella corrispondente, inseriscilo tra i 'presenti'.\n"
-            f"3. Se il nome è solo stampato a macchina senza firma a penna, considera il dipendente ASSENTE.\n"
-            f"4. Se non vedi alcuna firma a penna, la lista 'presenti' deve essere vuota.\n\n"
-            f"Rispondi ESCLUSIVAMENTE con un oggetto JSON valido in questo formato preciso e nessun altro testo:\n"
+            f"1. Cerca soltanto firme scritte a mano, "
+            f"sigle o tratti a penna nella pagina.\n"
+            f"2. Se un dipendente ha una firma scritta a mano "
+            f"visibile vicino al suo nome o nella casella "
+            f"corrispondente, inseriscilo tra i 'presenti'.\n"
+            f"3. Se il nome è solo stampato a macchina senza "
+            f"firma a penna, considera il dipendente ASSENTE.\n"
+            f"4. Se non vedi alcuna firma a penna, "
+            f"la lista 'presenti' deve essere vuota.\n\n"
+            f"Rispondi ESCLUSIVAMENTE con un oggetto JSON "
+            f"valido in questo formato preciso e nessun altro testo:\n"
             f'{{"presenti": ["Nome Cognome"]}}'
         )
 
@@ -93,7 +174,6 @@ async def scan_sheet(request: Request):
             }
         }
 
-                # Modelli Gemini
         candidate_models = [
             "gemini-3.8-flash"
         ]
@@ -102,50 +182,98 @@ async def scan_sheet(request: Request):
         last_error = ""
 
         for model_name in candidate_models:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+            url = (
+                "https://generativelanguage.googleapis.com/"
+                f"v1beta/models/{model_name}:generateContent"
+                f"?key={GEMINI_API_KEY}"
+            )
+
             try:
-                                # Riprova automaticamente se Gemini è sovraccarico
-                for tentativo in range(3):
-                    res = requests.post(url, json=payload, timeout=40)
+                res = await asyncio.to_thread(
+                    call_gemini,
+                    url,
+                    payload
+                )
 
-                    if res.status_code not in (429, 500, 502, 503, 504):
-                        break
-
-                    if tentativo < 2:
-                        time.sleep(2 ** (tentativo + 1))
-                        
                 if res.status_code == 200:
                     res_data = res.json()
                     candidates = res_data.get("candidates", [])
+
                     if candidates:
-                        parts = candidates[0].get("content", {}).get("parts", [])
+                        parts = (
+                            candidates[0]
+                            .get("content", {})
+                            .get("parts", [])
+                        )
+
                         if parts:
-                            raw_text = parts[0].get("text", "").strip()
+                            raw_text = (
+                                parts[0]
+                                .get("text", "")
+                                .strip()
+                            )
+
                             if "```" in raw_text:
-                                raw_text = re.sub(r'```(?:json)?\s*', '', raw_text)
-                                raw_text = raw_text.replace('```', '').strip()
+                                raw_text = re.sub(
+                                    r'```(?:json)?\s*',
+                                    '',
+                                    raw_text
+                                )
+                                raw_text = raw_text.replace(
+                                    '```', ''
+                                ).strip()
+
                             parsed_reply = json.loads(raw_text)
                             break
                 else:
-                    last_error = f"Model {model_name} HTTP {res.status_code}: {res.text[:150]}"
+                    last_error = (
+                        f"Model {model_name} "
+                        f"HTTP {res.status_code}: "
+                        f"{res.text[:150]}"
+                    )
+
             except Exception as e:
                 last_error = str(e)
 
         if not parsed_reply:
             return JSONResponse(
                 status_code=200,
-                content={"status": "error", "message": f"Errore risposta Gemini: {last_error}"}
+                content={
+                    "status": "error",
+                    "message": (
+                        f"Errore risposta Gemini: {last_error}"
+                    )
+                }
             )
 
         presenti = parsed_reply.get("presenti", [])
         matches = []
+
         for nome in presenti:
             for dip_real in dipendenti_list:
-                if dip_real.lower() in str(nome).lower() or str(nome).lower() in dip_real.lower():
-                    matches.append({"dipendente": dip_real, "score": 98.0})
+                if (
+                    dip_real.lower() in str(nome).lower()
+                    or str(nome).lower() in dip_real.lower()
+                ):
+                    matches.append({
+                        "dipendente": dip_real,
+                        "score": 98.0
+                    })
                     break
 
-        return JSONResponse(status_code=200, content={"status": "success", "matches": matches})
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "matches": matches
+            }
+        )
 
     except Exception as e:
-        return JSONResponse(status_code=200, content={"status": "error", "message": f"Errore server: {str(e)}"})
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "error",
+                "message": f"Errore server: {str(e)}"
+            }
+        )
