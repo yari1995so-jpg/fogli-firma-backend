@@ -177,7 +177,7 @@ async def scan_sheet(request: Request):
        candidate_models = [
     "gemini-3.5-flash-lite",
     "gemini-3.8-flash"
-        ]
+       ]
 
         parsed_reply = None
         last_error = ""
