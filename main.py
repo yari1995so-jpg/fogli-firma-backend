@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+import time
 import requests
 import json
 import re
@@ -103,7 +104,16 @@ async def scan_sheet(request: Request):
         for model_name in candidate_models:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
             try:
-                res = requests.post(url, json=payload, timeout=25)
+                                # Riprova automaticamente se Gemini è sovraccarico
+                for tentativo in range(3):
+                    res = requests.post(url, json=payload, timeout=40)
+
+                    if res.status_code not in (429, 500, 502, 503, 504):
+                        break
+
+                    if tentativo < 2:
+                        time.sleep(2 ** (tentativo + 1))
+                        
                 if res.status_code == 200:
                     res_data = res.json()
                     candidates = res_data.get("candidates", [])
